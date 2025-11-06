@@ -1,7 +1,8 @@
 # Complete Kubernetes Home Lab with Internet Exposure
 
 **Author:** Kenechi Dukor  
-**Last Updated:** November 2025
+**Last Updated:** November 6, 2025  
+**Version:** 2.0
 
 **Platform:** Supermicro X10SLL-S (Intel Xeon E3-1225 v3, 16GB RAM, 2TB SSD, 160GB HDD)  
 **Host OS:** Proxmox VE 9.0.3  
@@ -44,7 +45,7 @@ This home-lab environment uses Proxmox VE as the base hypervisor to host a Kuber
 |------|------|------------|------|--------|
 | k8s-master | Control Plane | 192.168.0.32 | 2 | 3 GB |
 | k8s-node1 | Worker Node | 192.168.0.39 | 2 | 4 GB |
-| k8s-node2 | Worker Node | 192.168.0.43 | 2 | 4 GB |
+| k8s-node2 | Worker Node | 192.168.0.45 | 2 | 4 GB |
 
 Additional 160 GB HDD is mounted at `/mnt/pve/repo160` for repository and persistent storage.
 
@@ -65,23 +66,56 @@ Create three Ubuntu 24.04 LTS VMs with these settings:
 - Enable EFI Disk and Cloud-Init if available
 - Assign static IPs through `/etc/netplan/` or router DHCP reservation
 - Enable bridge networking on Proxmox (usually `vmbr0`) to give each VM LAN access
+- **⚠️ CRITICAL: During Ubuntu installation, DO NOT create a swap partition**
 
 ---
 
 ## 3. Kubernetes Cluster Setup
+
+### ⚠️ CRITICAL Prerequisites
+
+Before installing Kubernetes on **each node**, you MUST:
+
+**1. Disable Swap (REQUIRED)**
+
+Kubernetes does not support swap. If swap is enabled, kubelet will fail to start and pods will crash randomly.
+
+```bash
+# Disable swap immediately
+sudo swapoff -a
+
+# Prevent swap from re-enabling on reboot
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+# Verify swap is disabled (should show 0B)
+free -h
+```
+
+**2. Enable IP Forwarding (REQUIRED)**
+
+```bash
+# Enable IP forwarding
+sudo sysctl -w net.ipv4.ip_forward=1
+
+# Make it permanent
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+
+# Verify (should show 1)
+cat /proc/sys/net/ipv4/ip_forward
+```
 
 ### Install Base Components on All Nodes
 
 Run these commands on **all three nodes** (k8s-master, k8s-node1, k8s-node2):
 
 ```bash
-sudo apt update && sudo apt install -y apt-transport-https ca-certificates curl
+sudo apt update && sudo apt install -y apt-transport-https ca-certificates curl containerd
 sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg \
   https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key
 echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] \
   https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /" | \
   sudo tee /etc/apt/sources.list.d/kubernetes.list
-sudo apt update && sudo apt install -y kubelet kubeadm kubectl containerd
+sudo apt update && sudo apt install -y kubelet kubeadm kubectl
 sudo systemctl enable kubelet containerd
 ```
 
@@ -120,6 +154,13 @@ kubeadm join 192.168.0.32:6443 --token <token> --discovery-token-ca-cert-hash sh
 ### Join Worker Nodes
 
 Run the join command (with `sudo`) on **both k8s-node1 and k8s-node2**.
+
+**If you get an IP forwarding error:**
+```bash
+# Enable IP forwarding and retry
+sudo sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+```
 
 **Verify cluster:**
 
@@ -334,6 +375,37 @@ Now let's make your Kubernetes services accessible from anywhere on the internet
 
 ### Complete Architecture
 
+```
+Internet User
+    ↓ Types: https://hello.yourdomain.com
+    ↓
+Cloudflare Network (104.21.x.x, 172.67.x.x)
+    ├─ Resolves DNS
+    ├─ Checks DDoS rules
+    └─ Terminates SSL (public certificate)
+    ↓
+Cloudflare Tunnel (encrypted QUIC/WebSocket)
+    ↓ Established connection (outbound from home)
+    ↓
+Your Home Network (192.168.0.0/24)
+    ├─ NO ports opened
+    ├─ NO port forwarding
+    └─ Home IP hidden
+    ↓
+Proxmox VE → Kubernetes Cluster
+    ↓
+cloudflared Pods (2 replicas, 8 connections total)
+    ↓ Routes to: ingress-nginx service
+    ↓
+Ingress NGINX (192.168.0.202:443)
+    ├─ Checks hostname: hello.yourdomain.com
+    ├─ TLS handshake (internal cert)
+    └─ Routes to: hello-world service
+    ↓
+Application Pods (hello-world)
+    └─ Returns: HTML response
+```
+
 ```mermaid
 graph TB
     User[Internet User<br/>Anywhere in World]
@@ -502,7 +574,8 @@ nslookup -type=ns yourdomain.com
 6. Name: `home-k8s-cluster`
 7. Click **"Save tunnel"**
 8. **Copy the token** shown (long string starting with `eyJ...`)
-9. **Keep this browser tab open!**
+9. **Note the Tunnel ID** (shown in the URL or tunnel list - format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+10. **Keep this browser tab open!**
 
 ---
 
@@ -544,7 +617,7 @@ spec:
             cpu: "100m"
           limits:
             memory: "256Mi"
-            cpu: "500m"
+            cpu: "200m"
 EOF
 ```
 
@@ -553,36 +626,61 @@ EOF
 kubectl get pods -n cloudflare
 # Should show 2 Running pods
 
-kubectl logs -n cloudflare -l app=cloudflared --tail=20
+kubectl logs -n cloudflare -l app=cloudflared --tail=10
 # Look for: "INF Registered tunnel connection"
 ```
 
 ---
 
-#### Step 4: Configure Tunnel Route (3 minutes)
+#### Step 4: Configure Tunnel Ingress Rules (3 minutes)
 
 **In the Cloudflare browser tab:**
 
-1. Go to **"Published application routes"** tab
-2. Click **"Add a public hostname"**
-3. Fill in:
+1. Go to **Networks** → **Tunnels** → **home-k8s-cluster**
+2. Click **"Published application routes"** tab
+3. Click **"+ Add a published application route"**
+4. Fill in:
    - **Subdomain:** `*` (asterisk for wildcard)
    - **Domain:** `yourdomain.com` (select from dropdown)
    - **Path:** (leave blank)
    - **Service Type:** `HTTPS`
    - **Service URL:** `ingress-nginx-controller.ingress-nginx.svc.cluster.local:443`
 
-4. Click **"Additional application settings"** (expand)
-5. Under **TLS**, toggle **"No TLS Verify"** to **ON**
-6. Click **"Save hostname"**
+5. Expand **"Additional application settings"**
+6. Under **TLS**, toggle **"No TLS Verify"** to **ON**
+7. Click **"Save"**
 
-**Verify:**
-- Go to **Networks** → **Tunnels**
-- Status should be **"Healthy"** (green)
+**⚠️ Important:** If you get a DNS conflict error, delete the route and proceed to Step 5 to create the DNS record manually.
 
 ---
 
-#### Step 5: Create SSL Certificate Issuer (2 minutes)
+#### Step 5: Create DNS Records (2 minutes)
+
+**In Cloudflare Dashboard:**
+
+1. Click your domain → **DNS** → **Records**
+2. Click **"+ Add record"**
+3. Create tunnel CNAME:
+   - **Type:** `CNAME`
+   - **Name:** `*` (wildcard)
+   - **Target:** `<YOUR-TUNNEL-ID>.cfargotunnel.com` 
+     - Replace `<YOUR-TUNNEL-ID>` with your actual tunnel ID from Step 2
+     - Example: `7437b588-6db4-4d6c-a3b9-643072312ca8.cfargotunnel.com`
+   - **Proxy status:** **ON** (orange cloud) ← **CRITICAL!**
+   - **TTL:** Auto
+4. Click **"Save"**
+
+**Verify DNS:**
+```bash
+nslookup hello.yourdomain.com
+# Should return Cloudflare IPs (104.21.x.x or 172.67.x.x)
+```
+
+**Note:** With Proxy ON, Cloudflare routes traffic through the tunnel. The manual CNAME approach is more reliable than automatic DNS creation.
+
+---
+
+#### Step 6: Create SSL Certificate Issuer (2 minutes)
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -610,24 +708,6 @@ EOF
 kubectl get clusterissuer
 # Should show: letsencrypt-prod   True
 ```
-
----
-
-#### Step 6: Create DNS Records (2 minutes)
-
-**In Cloudflare Dashboard:**
-
-1. Click your domain → **DNS** → **Records**
-2. Click **"Add record"**
-3. Create wildcard:
-   - **Type:** `A`
-   - **Name:** `*`
-   - **IPv4 address:** `192.0.2.1` (dummy IP)
-   - **Proxy status:** **ON** (orange cloud) ← **CRITICAL!**
-   - **TTL:** Auto
-4. Click **"Save"**
-
-**Note:** With Proxy ON, Cloudflare routes through the tunnel and ignores the IP address.
 
 ---
 
@@ -707,17 +787,19 @@ kubectl get pods -w
 # Check certificate (takes 2-3 minutes)
 kubectl get certificate
 
-# Test DNS
-nslookup hello.yourdomain.com
-# Should return Cloudflare IPs
-
-# Test HTTPS
-curl https://hello.yourdomain.com
+# Test from your cluster
+kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
+  curl -I https://hello.yourdomain.com
 ```
 
-### Open in Browser
+### Test from Internet
 
-Visit `https://hello.yourdomain.com` - you should see the hello world page! 🎉
+```bash
+curl -I https://hello.yourdomain.com
+# Should return: HTTP/2 200
+```
+
+Visit `https://hello.yourdomain.com` in your browser - you should see the hello world page! 🎉
 
 ---
 
@@ -780,7 +862,68 @@ kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
 
 ## 10. Troubleshooting Guide
 
-### Issue: Tunnel Shows "Down"
+### Issue: Node Shows "NotReady" or Pods Keep Crashing
+
+**Cause:** Swap is enabled (most common issue)
+
+**Symptoms:**
+- Nodes show "NotReady" status
+- Pods in CrashLoopBackOff
+- kubelet service fails to start
+- Pods start then exit after 1-2 minutes
+
+**Check:**
+```bash
+# On the problematic node
+free -h
+# If swap shows anything other than 0B, swap is enabled
+```
+
+**Fix:**
+```bash
+# SSH to the problematic node
+ssh user@node-ip
+
+# Disable swap immediately
+sudo swapoff -a
+
+# Prevent swap from re-enabling
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+# Verify swap is disabled
+free -h
+# Should show: Swap: 0B 0B 0B
+
+# Restart kubelet
+sudo systemctl restart kubelet
+
+# Check kubelet status
+sudo systemctl status kubelet
+```
+
+**Prevention:** Always disable swap during initial Ubuntu installation or immediately after VM creation.
+
+---
+
+### Issue: kubeadm join fails with "IP forwarding" error
+
+**Error message:** `ERROR FileContent--proc-sys-net-ipv4-ip_forward`
+
+**Fix:**
+```bash
+# Enable IP forwarding
+sudo sysctl -w net.ipv4.ip_forward=1
+
+# Make permanent
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+
+# Retry join command
+sudo kubeadm join ...
+```
+
+---
+
+### Issue: Tunnel Shows "Down" or "Unhealthy"
 
 **Check:**
 ```bash
@@ -788,12 +931,41 @@ kubectl get pods -n cloudflare
 kubectl logs -n cloudflare -l app=cloudflared --tail=50
 ```
 
-**Look for:** "Registered tunnel connection" messages
+**Look for:** "INF Registered tunnel connection" messages
 
 **Common fixes:**
 - Wrong token → Redeploy with correct token
 - Restart tunnel: `kubectl rollout restart deployment cloudflared -n cloudflare`
-- Check network: `kubectl exec -n cloudflare deployment/cloudflared -- wget -O- https://1.1.1.1`
+- Check cluster DNS: `kubectl get pods -n kube-system -l k8s-app=kube-dns`
+
+---
+
+### Issue: Error 522 (Connection timeout)
+
+**Cause:** Cloudflare tunnel can't reach Ingress NGINX
+
+**Check:**
+```bash
+# Is Ingress running?
+kubectl get pods -n ingress-nginx
+kubectl get svc -n ingress-nginx
+
+# Test if pods can reach the service
+kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
+  curl -Ik https://ingress-nginx-controller.ingress-nginx.svc.cluster.local:443
+# Should return: HTTP/2 (any status code means connectivity works)
+```
+
+**Common causes:**
+- Published application route has wrong URL
+- DNS CNAME not created or pointing to wrong tunnel ID
+- "No TLS Verify" not enabled in tunnel config
+
+**Fix:**
+1. Verify tunnel configuration shows: `ingress-nginx-controller.ingress-nginx.svc.cluster.local:443`
+2. Verify DNS CNAME points to: `<tunnel-id>.cfargotunnel.com`
+3. Verify Proxy status is ON (orange cloud)
+4. Check tunnel logs for connection errors
 
 ---
 
@@ -802,36 +974,23 @@ kubectl logs -n cloudflare -l app=cloudflared --tail=50
 **Cause:** DNS record missing or not proxied
 
 **Fix:**
-1. Cloudflare → DNS → Records
-2. Verify wildcard `*` exists
-3. Verify **Proxy status is ON** (orange cloud)
-4. Wait 5 minutes for propagation
+1. Go to Cloudflare → DNS → Records
+2. Verify CNAME `*` exists
+3. Target should be: `<your-tunnel-id>.cfargotunnel.com`
+4. Verify **Proxy status is ON** (orange cloud)
+5. Wait 2-5 minutes for DNS propagation
 
----
-
-### Issue: Error 522 (Connection timeout)
-
-**Cause:** Tunnel can't reach Ingress NGINX
-
-**Check:**
+**Test DNS:**
 ```bash
-# Is Ingress running?
-kubectl get pods -n ingress-nginx
-kubectl get svc -n ingress-nginx
-
-# Test internal connectivity
-kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
-  curl -Ik -H "Host: hello.yourdomain.com" \
-  https://ingress-nginx-controller.ingress-nginx.svc.cluster.local:443
-# Should return: HTTP/2 200
+nslookup hello.yourdomain.com
+# Should return Cloudflare IPs (104.21.x.x or 172.67.x.x)
 ```
-
-**Fix:** Verify tunnel route URL is exactly: `https://ingress-nginx-controller.ingress-nginx.svc.cluster.local:443`
 
 ---
 
 ### Issue: Certificate Not Ready
 
+**Check:**
 ```bash
 kubectl describe certificate hello-world-tls -n default
 kubectl logs -n cert-manager -l app=cert-manager --tail=50
@@ -840,14 +999,20 @@ kubectl logs -n cert-manager -l app=cert-manager --tail=50
 **Common causes:**
 - DNS not resolving yet (wait 2-3 minutes)
 - ClusterIssuer misconfigured
-- Let's Encrypt rate limits
+- Let's Encrypt rate limits (5 per week for same domain)
+- Ingress not properly configured
 
 **Fix:**
 ```bash
-# Delete and recreate
+# Delete and recreate certificate
 kubectl delete certificate hello-world-tls -n default
+
+# Delete and recreate ingress (this triggers new cert request)
 kubectl delete ingress hello-world -n default
-# Then reapply manifest
+# Then reapply your ingress manifest
+
+# Watch certificate creation
+kubectl get certificate -w
 ```
 
 ---
@@ -856,14 +1021,14 @@ kubectl delete ingress hello-world -n default
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Tunnel shows "Down" | cloudflared not connecting | Check logs, restart deployment |
-| Error 522 | Tunnel can't reach Ingress | Verify tunnel URL and Ingress status |
-| Could not resolve host | Missing/wrong DNS record | Add A record with Proxy ON |
-| Certificate not ready | DNS not propagating | Wait 2-3 min, check cert-manager logs |
-| ErrImagePull | Image not accessible | Use public image or check registry |
-| CrashLoopBackOff | App crashing | Check pod logs: `kubectl logs <pod>` |
-| Node NotReady | Flannel down | Restart Flannel pods |
-| No external IP on service | MetalLB issue | Check MetalLB configuration |
+| Node NotReady, pods crashing | Swap enabled | Disable swap with `swapoff -a` |
+| kubeadm join fails | IP forwarding disabled | `sysctl -w net.ipv4.ip_forward=1` |
+| Tunnel shows "Down" | cloudflared not connecting | Check logs, verify token, restart |
+| Error 522 | Tunnel can't reach Ingress | Verify service URL and No TLS Verify |
+| Could not resolve host | Missing/wrong DNS record | Create CNAME with Proxy ON |
+| Certificate not ready | DNS propagation | Wait 2-3 min, check cert-manager logs |
+| Pods in CrashLoopBackOff | Check pod logs | `kubectl logs <pod> --previous` |
+| Service has no EXTERNAL-IP | MetalLB not configured | Check MetalLB pods and IPAddressPool |
 
 ---
 
@@ -877,41 +1042,57 @@ kubectl delete ingress hello-world -n default
 qm snapshot <VMID> backup-$(date +%Y%m%d)
 ```
 
-**Velero (cluster backup):**
+**etcd backup (cluster state):**
 ```bash
-# Install Velero for automated backups
-kubectl apply -f https://github.com/vmware-tanzu/velero/releases/download/v1.12.0/velero-v1.12.0-linux-amd64.tar.gz
+# On k8s-master
+sudo ETCDCTL_API=3 etcdctl \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key \
+  snapshot save /backup/etcd-snapshot-$(date +%Y%m%d).db
 ```
 
 ### Scaling
 
 **Add worker nodes:**
 1. Create new VM in Proxmox
-2. Install Kubernetes components (Section 3)
-3. Run the `kubeadm join` command
-4. Verify: `kubectl get nodes`
+2. Install Ubuntu 24.04 **without swap**
+3. Enable IP forwarding
+4. Install Kubernetes components (Section 3)
+5. Generate join token on master: `kubeadm token create --print-join-command`
+6. Run join command on new node
+7. Verify: `kubectl get nodes`
 
 ### Updates
 
+**Update packages on nodes:**
 ```bash
-# Update packages
 sudo apt update && sudo apt upgrade -y
+```
 
-# Check Kubernetes version
+**Check Kubernetes version:**
+```bash
 kubectl version --short
+```
 
-# Plan upgrade
+**Plan Kubernetes upgrade:**
+```bash
 sudo kubeadm upgrade plan
 ```
 
 ### Deploy Additional Services
 
-Once hello-world works, add more apps easily:
+Once hello-world works, deploy more apps:
 
 ```bash
-kubectl create deployment myapp --image=nginx
+# Create deployment
+kubectl create deployment myapp --image=your-image
+
+# Expose as service
 kubectl expose deployment myapp --port=80
 
+# Create ingress
 cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -939,7 +1120,7 @@ spec:
 EOF
 ```
 
-Result: `https://myapp.yourdomain.com` works in 2-3 minutes! 🚀
+Result: `https://myapp.yourdomain.com` works automatically! 🚀
 
 ---
 
@@ -980,15 +1161,43 @@ Result: `https://myapp.yourdomain.com` works in 2-3 minutes! 🚀
 | Hardware | Already owned |
 | **Total** | **~$1/month** |
 
+### Critical Success Factors
+
+The following are **essential** for cluster stability:
+
+1. ⚠️ **Swap must be disabled** on all nodes (most common failure point)
+2. ⚠️ **IP forwarding must be enabled** on all nodes
+3. ⚠️ **Cloudflare tunnel DNS must use manual CNAME** (more reliable than auto-creation)
+4. ⚠️ **"No TLS Verify" must be enabled** in Cloudflare tunnel configuration
+
 ### Next Steps
 
 - Deploy your own applications
 - Add monitoring (Prometheus/Grafana)
 - Set up CI/CD pipelines
+- Implement automated backups
 - Experiment with different workloads
-- Share your setup with others!
+- Add more worker nodes as needed
 
-You now have enterprise-grade infrastructure that rivals cloud providers, running at home, under your complete control, for almost no cost.
+---
+
+## Lessons Learned
+
+During the development of this lab, several critical issues were discovered and resolved:
+
+1. **Swap causes random pod failures** - Kubernetes requires swap to be completely disabled. Even with swap configured, pods will start successfully but crash after 1-2 minutes with no clear error messages. This was the root cause of persistent node2 instability.
+
+2. **IP forwarding must be enabled** - kubeadm will fail to join nodes if IP forwarding is not enabled in the kernel.
+
+3. **Cloudflare auto-DNS is unreliable** - The "Published application routes" feature sometimes fails to create DNS records automatically, especially with wildcard hostnames. Manually creating a CNAME record pointing to `<tunnel-id>.cfargotunnel.com` is more reliable.
+
+4. **ClusterIP routing requires working kube-proxy** - If pods can reach services via pod IP but not via ClusterIP, check that kube-proxy is running on all nodes.
+
+5. **Fresh VM solves persistent issues** - When a node experiences repeated failures despite fixes, recreating the VM from scratch (with proper configuration) is often faster than troubleshooting deep system issues.
+
+---
+
+**You now have enterprise-grade infrastructure that rivals cloud providers, running at home, under your complete control, for almost no cost.**
 
 **Deploy like Heroku. Run at home. Pay almost nothing.** 🚀
 
@@ -996,5 +1205,9 @@ You now have enterprise-grade infrastructure that rivals cloud providers, runnin
 
 **Author:** Kenechi Dukor  
 **© 2025** | Free to use and share with attribution  
+
+**Version History:**
+- v2.0 (Nov 6, 2025): Added critical swap warnings, IP forwarding requirements, manual DNS approach, enhanced troubleshooting
+- v1.0 (Nov 2025): Initial release
 
 **End of Document**
