@@ -1,58 +1,338 @@
-# Complete Kubernetes Home Lab Guide with Internet Exposure
+# 🧠 Complete Kubernetes Home Lab with Internet Exposure
 
 **Author:** Kenechi Dukor  
 **Last Updated:** November 2025
 
-This comprehensive guide walks you through building a production-grade Kubernetes cluster on Proxmox and exposing services to the internet securely using Cloudflare Tunnel.
-
-**System:** Supermicro X10SLL-S | Proxmox VE 9.0.3 | 3-Node K8s Cluster  
-**Method:** Zero port forwarding, hidden home IP, free DDoS protection
-
----
-
-## Quick Navigation
-
-- [Prerequisites & Hardware](#prerequisites)
-- [Basic Cluster Setup (Sections 1-7)](#basic-kubernetes-cluster)
-- [**Internet Exposure Setup (Section 8)**](#exposing-to-the-internet)
-- [Troubleshooting Guide](#troubleshooting)
-- [Command Reference](#useful-commands)
+**Platform:** Supermicro X10SLL-S (Intel Xeon E3-1225 v3, 16GB RAM, 2TB SSD, 160GB HDD)  
+**Host OS:** Proxmox VE 9.0.3  
+**Network:** 192.168.0.0/24 LAN  
+**Internet Exposure:** Cloudflare Tunnel (no port forwarding required)
 
 ---
 
-## Prerequisites
+## 📚 Table of Contents
 
-**Hardware:**
-- Server: Supermicro X10SLL-S (or similar)
-- CPU: Intel Xeon E3-1225 v3 (or equivalent)
-- RAM: 16GB minimum
-- Storage: 2TB SSD + optional 160GB HDD
+**Part I: Local Cluster Setup**
+1. [System Overview](#1-system-overview)
+2. [Proxmox Host Configuration](#2-proxmox-host-configuration)
+3. [Kubernetes Cluster Setup](#3-kubernetes-cluster-setup)
+4. [Network & Load Balancing Components](#4-network--load-balancing-components)
+5. [Management & Monitoring Tools](#5-management--monitoring-tools)
+6. [Deploying Applications Locally](#6-deploying-applications-locally)
 
-**Software:**
-- Proxmox VE 9.x installed
-- Ubuntu 24.04 LTS ISO
-- Domain name (~$10-15/year)
-- Free Cloudflare account
+**Part II: Internet Exposure**
+7. [Exposing Services to the Internet](#7-exposing-services-to-the-internet)
+8. [Deploy Your First Internet-Accessible App](#8-deploy-your-first-internet-accessible-app)
+
+**Part III: Operations**
+9. [Handy Operational Commands](#9-handy-operational-commands)
+10. [Troubleshooting Guide](#10-troubleshooting-guide)
+11. [Maintenance & Expansion](#11-maintenance--expansion)
+12. [Summary](#12-summary)
 
 ---
 
-## Basic Kubernetes Cluster
+# Part I: Local Cluster Setup
+
+## 1. System Overview
+
+This home-lab environment uses Proxmox VE as the base hypervisor to host a Kubernetes cluster composed of three Ubuntu 24.04 VMs. The setup allows containerized services (APIs, dashboards, Nextcloud, etc.) to be deployed in a production-like, reproducible environment.
 
 ### Cluster Nodes
 
-| Node | Role | IP | vCPU | RAM |
-|------|------|-----|------|-----|
-| k8s-master | Control Plane | 192.168.0.32 | 2 | 3GB |
-| k8s-node1 | Worker | 192.168.0.39 | 2 | 4GB |
-| k8s-node2 | Worker | 192.168.0.43 | 2 | 4GB |
+| Node | Role | IP Address | vCPU | Memory |
+|------|------|------------|------|--------|
+| k8s-master | Control Plane | 192.168.0.32 | 2 | 3 GB |
+| k8s-node1 | Worker Node | 192.168.0.39 | 2 | 4 GB |
+| k8s-node2 | Worker Node | 192.168.0.43 | 2 | 4 GB |
 
-For detailed cluster setup (Proxmox VMs, Kubernetes installation, Flannel, MetalLB, Ingress NGINX, Cert-Manager), refer to sections 1-7 in the full documentation. This section focuses on **internet exposure**.
+Additional 160 GB HDD is mounted at `/mnt/pve/repo160` for repository and persistent storage.
 
 ---
 
-## Exposing to the Internet
+## 2. Proxmox Host Configuration
 
-### Complete Architecture
+### Install Proxmox VE
+
+Install Proxmox VE 9.x on the 2 TB SSD.
+
+### Create Ubuntu VMs
+
+Create three Ubuntu 24.04 LTS VMs with these settings:
+
+- Boot from `ubuntu-24.04.3-live-server-amd64.iso`
+- Disk size: 30–40 GB each
+- Enable EFI Disk and Cloud-Init if available
+- Assign static IPs through `/etc/netplan/` or router DHCP reservation
+- Enable bridge networking on Proxmox (usually `vmbr0`) to give each VM LAN access
+
+---
+
+## 3. Kubernetes Cluster Setup
+
+### Install Base Components on All Nodes
+
+Run these commands on **all three nodes** (k8s-master, k8s-node1, k8s-node2):
+
+```bash
+sudo apt update && sudo apt install -y apt-transport-https ca-certificates curl
+sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg \
+  https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] \
+  https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /" | \
+  sudo tee /etc/apt/sources.list.d/kubernetes.list
+sudo apt update && sudo apt install -y kubelet kubeadm kubectl containerd
+sudo systemctl enable kubelet containerd
+```
+
+### Configure Containerd
+
+Run on **all three nodes**:
+
+```bash
+sudo containerd config default | sudo tee /etc/containerd/config.toml >/dev/null
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+sudo systemctl restart containerd
+```
+
+### Initialize the Control Plane
+
+On **k8s-master only**:
+
+```bash
+sudo kubeadm init --pod-network-cidr=10.244.0.0/16
+```
+
+Configure kubectl for the current user:
+
+```bash
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+```
+
+The output provides a join command for workers. **Copy this command** - it looks like:
+
+```bash
+kubeadm join 192.168.0.32:6443 --token <token> --discovery-token-ca-cert-hash sha256:<hash>
+```
+
+### Join Worker Nodes
+
+Run the join command (with `sudo`) on **both k8s-node1 and k8s-node2**.
+
+**Verify cluster:**
+
+```bash
+kubectl get nodes
+```
+
+All nodes should appear, though they'll be "NotReady" until we install the network plugin.
+
+---
+
+## 4. Network & Load Balancing Components
+
+### 🕸️ Flannel (CNI - Container Network Interface)
+
+**Purpose:** Provides pod-to-pod networking overlay (10.244.0.0/16).
+
+**Install:**
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+```
+
+**Verify:**
+
+```bash
+kubectl get pods -n kube-flannel -o wide
+```
+
+Wait until all Flannel pods show `Running`. Then check nodes:
+
+```bash
+kubectl get nodes
+```
+
+All nodes should now show `Ready`.
+
+---
+
+### ⚖️ MetalLB (Bare-Metal LoadBalancer)
+
+**Purpose:** Enables LoadBalancer services on non-cloud clusters by assigning IPs from your LAN.
+
+**Install:**
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.12/config/manifests/metallb-native.yaml
+```
+
+**Create IP address pool:**
+
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  namespace: metallb-system
+  name: home-lan-pool
+spec:
+  addresses:
+  - 192.168.0.200-192.168.0.250
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  namespace: metallb-system
+  name: home-lan-advert
+spec:
+  ipAddressPools:
+  - home-lan-pool
+EOF
+```
+
+Now any service of type `LoadBalancer` automatically gets a LAN IP (e.g., 192.168.0.201).
+
+---
+
+### 🌍 Ingress NGINX
+
+**Purpose:** Routes HTTP/HTTPS traffic to internal services using domain names.
+
+**Install:**
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml
+```
+
+**Verify:**
+
+```bash
+kubectl get pods -n ingress-nginx
+kubectl get svc -n ingress-nginx
+```
+
+Note the EXTERNAL-IP assigned to `ingress-nginx-controller` (e.g., 192.168.0.202).
+
+---
+
+### 🔒 Cert-Manager
+
+**Purpose:** Automates SSL/TLS certificate management from Let's Encrypt.
+
+**Install:**
+
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.15.0/cert-manager.yaml
+```
+
+**Verify:**
+
+```bash
+kubectl get pods -n cert-manager
+```
+
+Wait for all cert-manager pods to show `Running`.
+
+---
+
+## 5. Management & Monitoring Tools
+
+### 🧭 Portainer (Kubernetes GUI)
+
+**Purpose:** Visual management of containers, pods, and volumes.
+
+**Install:**
+
+```bash
+kubectl create namespace portainer
+kubectl apply -n portainer -f https://downloads.portainer.io/ce2-20/portainer-k8s-nodeport.yaml
+```
+
+**Access:**
+
+Get the NodePort assigned:
+
+```bash
+kubectl get svc -n portainer
+```
+
+Access via: `https://<any-node-ip>:<nodeport>` or `https://<MetalLB-IP>:9443`
+
+Create admin user on first login.
+
+---
+
+### 💾 Persistent Storage (Optional)
+
+Mount the 160 GB HDD and make it available for persistent volumes:
+
+**Mount the disk:**
+
+```bash
+sudo mkdir -p /mnt/repo160
+sudo mount /dev/sdb1 /mnt/repo160
+```
+
+**Create PV/PVC:**
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: repo160-pv
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteMany
+  hostPath:
+    path: /mnt/repo160
+  persistentVolumeReclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: repo160-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+```
+
+Apply:
+
+```bash
+kubectl apply -f repo160-storage.yaml
+```
+
+---
+
+## 6. Deploying Applications Locally
+
+### Example: Simple NGINX Deployment
+
+```bash
+kubectl create deployment nginx --image=nginx
+kubectl expose deployment nginx --port=80 --type=LoadBalancer
+kubectl get svc nginx
+```
+
+MetalLB will assign an IP like `192.168.0.201`. Access via browser: `http://192.168.0.201`
+
+---
+
+# Part II: Internet Exposure
+
+## 7. Exposing Services to the Internet
+
+Now let's make your Kubernetes services accessible from anywhere on the internet using **Cloudflare Tunnel** - no port forwarding needed!
+
+### 🏗️ Complete Architecture
 
 ```mermaid
 graph TB
@@ -92,7 +372,7 @@ graph TB
     style App2 fill:#26a69a
 ```
 
-### Detailed Traffic Flow
+### 📊 Traffic Flow
 
 ```
 Internet User
@@ -125,7 +405,7 @@ Application Pods (hello-world)
     └─ Returns: HTML response
 ```
 
-### Request-Response Sequence
+### 🔄 Request-Response Sequence
 
 ```mermaid
 sequenceDiagram
@@ -150,7 +430,7 @@ sequenceDiagram
     CF->>User: HTTPS with Let's Encrypt cert
 ```
 
-### Component Roles
+### 🧩 Component Roles
 
 **Cloudflare:** Manages DNS, provides DDoS protection, terminates SSL for public traffic, and routes requests through the tunnel.
 
@@ -164,7 +444,7 @@ sequenceDiagram
 
 **Flannel:** Provides pod-to-pod networking using VXLAN overlay network (10.244.0.0/16).
 
-### Security Benefits
+### 🔐 Security Benefits
 
 - **No exposed home IP:** Your public IP address never appears in DNS or traffic
 - **No open ports:** Router firewall remains completely closed
@@ -175,22 +455,34 @@ sequenceDiagram
 
 ---
 
-### Step 1: Transfer Domain to Cloudflare DNS
+### 📋 Prerequisites for Internet Exposure
 
-**Time: 10 minutes**
+Before starting, you need:
 
-1. **At Cloudflare** (https://dash.cloudflare.com):
-   - Click "Add a Site"
-   - Enter `yourdomain.com`
-   - Choose **Free** plan
-   - Copy the 2 nameservers shown (e.g., `ellis.ns.cloudflare.com`)
+1. ✅ A domain name (e.g., from Namecheap - costs ~$10-15/year)
+2. ✅ A free Cloudflare account (sign up at https://cloudflare.com)
+3. ✅ Your Kubernetes cluster with Ingress NGINX and Cert-Manager installed ✅
 
-2. **At your domain registrar** (Namecheap, GoDaddy, etc.):
-   - Find domain settings
-   - Change nameservers to Cloudflare's
-   - Save
+---
 
-3. **Wait 5-30 minutes** for DNS propagation
+### 🚀 Step-by-Step Setup
+
+#### Step 1: Transfer Domain DNS to Cloudflare (10 minutes)
+
+**At Cloudflare:**
+1. Log in to https://dash.cloudflare.com
+2. Click **"Add a Site"**
+3. Enter your domain: `yourdomain.com`
+4. Select the **Free** plan
+5. Copy the 2 nameservers shown (e.g., `ellis.ns.cloudflare.com`, `liv.ns.cloudflare.com`)
+
+**At your domain registrar (Namecheap, GoDaddy, etc.):**
+1. Find domain settings → Nameservers
+2. Change to "Custom DNS"
+3. Paste the 2 Cloudflare nameservers
+4. Save
+
+**Wait 5-30 minutes** for DNS propagation. Cloudflare will email you when active.
 
 **Verify:**
 ```bash
@@ -200,30 +492,27 @@ nslookup -type=ns yourdomain.com
 
 ---
 
-### Step 2: Create Cloudflare Tunnel
+#### Step 2: Create Cloudflare Tunnel (5 minutes)
 
-**Time: 5 minutes**
-
-1. In Cloudflare Dashboard → **Zero Trust** (or https://one.dash.cloudflare.com)
-2. **Networks** → **Tunnels**
-3. Click **Create a tunnel**
-4. Select **Cloudflared**
-5. Name: `home-k8s-cluster`
-6. Click **Save tunnel**
-7. **Copy the token** shown (long string starting with `eyJ...`)
-8. **Keep this browser tab open!**
+1. In Cloudflare Dashboard, click **Zero Trust** (or go to https://one.dash.cloudflare.com)
+2. Click **"Get started with a free plan"** if prompted
+3. Navigate to **Networks** → **Tunnels**
+4. Click **"Create a tunnel"**
+5. Select **"Cloudflared"**
+6. Name: `home-k8s-cluster`
+7. Click **"Save tunnel"**
+8. **Copy the token** shown (long string starting with `eyJ...`)
+9. **Keep this browser tab open!**
 
 ---
 
-### Step 3: Deploy Cloudflared in Kubernetes
-
-**Time: 2 minutes**
+#### Step 3: Deploy Cloudflared in Kubernetes (2 minutes)
 
 ```bash
 # Create namespace
 kubectl create namespace cloudflare
 
-# Deploy cloudflared (replace YOUR_TOKEN with actual token)
+# Deploy cloudflared (replace YOUR_TOKEN with actual token from Step 2)
 cat <<'EOF' | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
@@ -259,7 +548,7 @@ spec:
 EOF
 ```
 
-**Verify deployment:**
+**Verify:**
 ```bash
 kubectl get pods -n cloudflare
 # Should show 2 Running pods
@@ -270,14 +559,12 @@ kubectl logs -n cloudflare -l app=cloudflared --tail=20
 
 ---
 
-### Step 4: Configure Tunnel Route
-
-**Time: 3 minutes**
+#### Step 4: Configure Tunnel Route (3 minutes)
 
 **In the Cloudflare browser tab:**
 
-1. Go to **Published application routes** tab
-2. Click **Add a public hostname**
+1. Go to **"Published application routes"** tab
+2. Click **"Add a public hostname"**
 3. Fill in:
    - **Subdomain:** `*` (asterisk for wildcard)
    - **Domain:** `yourdomain.com` (select from dropdown)
@@ -285,20 +572,17 @@ kubectl logs -n cloudflare -l app=cloudflared --tail=20
    - **Service Type:** `HTTPS`
    - **Service URL:** `ingress-nginx-controller.ingress-nginx.svc.cluster.local:443`
 
-4. Click **Additional application settings** (expand)
-5. Under **TLS**, toggle **No TLS Verify** to **ON**
-6. Click **Save hostname**
+4. Click **"Additional application settings"** (expand)
+5. Under **TLS**, toggle **"No TLS Verify"** to **ON**
+6. Click **"Save hostname"**
 
 **Verify:**
 - Go to **Networks** → **Tunnels**
 - Status should be **"Healthy"** (green)
-- If "Down", wait 2 minutes and refresh
 
 ---
 
-### Step 5: Create SSL Certificate Issuer
-
-**Time: 2 minutes**
+#### Step 5: Create SSL Certificate Issuer (2 minutes)
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -329,29 +613,25 @@ kubectl get clusterissuer
 
 ---
 
-### Step 6: Create DNS Records
-
-**Time: 2 minutes**
+#### Step 6: Create DNS Records (2 minutes)
 
 **In Cloudflare Dashboard:**
 
 1. Click your domain → **DNS** → **Records**
-2. Click **Add record**
+2. Click **"Add record"**
 3. Create wildcard:
    - **Type:** `A`
    - **Name:** `*`
    - **IPv4 address:** `192.0.2.1` (dummy IP)
    - **Proxy status:** **ON** (orange cloud) ← **CRITICAL!**
    - **TTL:** Auto
-4. Click **Save**
+4. Click **"Save"**
 
-**Why dummy IP?** With Proxy ON, Cloudflare routes through the tunnel and ignores the IP.
+**Note:** With Proxy ON, Cloudflare routes through the tunnel and ignores the IP address.
 
 ---
 
-### Deploy Your First Internet-Accessible App
-
-**Time: 3 minutes**
+## 8. Deploy Your First Internet-Accessible App
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -417,29 +697,90 @@ EOF
 
 **Replace** `yourdomain.com` with your domain!
 
-**Monitor deployment:**
+### Monitor Deployment
+
 ```bash
 # Watch pods start
 kubectl get pods -w
+# Press Ctrl+C after Running
 
 # Check certificate (takes 2-3 minutes)
 kubectl get certificate
 
 # Test DNS
 nslookup hello.yourdomain.com
-# Should return Cloudflare IPs (104.x or 172.x)
+# Should return Cloudflare IPs
 
-# Test in browser
+# Test HTTPS
 curl https://hello.yourdomain.com
 ```
 
-**Success!** Your app is now accessible worldwide at `https://hello.yourdomain.com` 🎉
+### Open in Browser
+
+Visit `https://hello.yourdomain.com` - you should see the hello world page! 🎉
 
 ---
 
-## Troubleshooting
+# Part III: Operations
 
-### Issue: Tunnel shows "Down"
+## 9. Handy Operational Commands
+
+### Basic Operations
+
+| Purpose | Command |
+|---------|---------|
+| List all pods | `kubectl get pods -A -o wide` |
+| View logs | `kubectl logs <pod-name> -n <namespace>` |
+| Follow logs | `kubectl logs <pod-name> -n <namespace> -f` |
+| Describe pod | `kubectl describe pod <pod-name> -n <namespace>` |
+| Check nodes | `kubectl get nodes -o wide` |
+| Apply manifest | `kubectl apply -f <file>.yaml` |
+| Delete manifest | `kubectl delete -f <file>.yaml` |
+| SSH into pod | `kubectl exec -it <pod> -- /bin/bash` |
+
+### Tunnel Management
+
+```bash
+# Check tunnel status
+kubectl get pods -n cloudflare
+kubectl logs -n cloudflare -l app=cloudflared -f
+
+# Restart tunnel
+kubectl rollout restart deployment cloudflared -n cloudflare
+```
+
+### Certificate Management
+
+```bash
+# View all certificates
+kubectl get certificate -A
+
+# Check certificate details
+kubectl describe certificate <cert-name> -n <namespace>
+
+# Check cert-manager logs
+kubectl logs -n cert-manager -l app=cert-manager --tail=50
+```
+
+### Ingress & Services
+
+```bash
+# View all ingresses
+kubectl get ingress -A
+
+# Check Ingress NGINX logs
+kubectl logs -n ingress-nginx -l app.kubernetes.io/component=controller --tail=100
+
+# Test internal connectivity
+kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
+  curl -Ik https://ingress-nginx-controller.ingress-nginx.svc.cluster.local:443
+```
+
+---
+
+## 10. Troubleshooting Guide
+
+### Issue: Tunnel Shows "Down"
 
 **Check:**
 ```bash
@@ -451,14 +792,8 @@ kubectl logs -n cloudflare -l app=cloudflared --tail=50
 
 **Common fixes:**
 - Wrong token → Redeploy with correct token
-- Network issues → Check if pods can reach internet:
-  ```bash
-  kubectl exec -n cloudflare deployment/cloudflared -- wget -O- https://1.1.1.1
-  ```
-- Restart tunnel:
-  ```bash
-  kubectl rollout restart deployment cloudflared -n cloudflare
-  ```
+- Restart tunnel: `kubectl rollout restart deployment cloudflared -n cloudflare`
+- Check network: `kubectl exec -n cloudflare deployment/cloudflared -- wget -O- https://1.1.1.1`
 
 ---
 
@@ -467,9 +802,9 @@ kubectl logs -n cloudflare -l app=cloudflared --tail=50
 **Cause:** DNS record missing or not proxied
 
 **Fix:**
-1. Go to Cloudflare → DNS → Records
+1. Cloudflare → DNS → Records
 2. Verify wildcard `*` exists
-3. Verify **Proxy status is ON** (orange cloud, not gray)
+3. Verify **Proxy status is ON** (orange cloud)
 4. Wait 5 minutes for propagation
 
 ---
@@ -491,19 +826,11 @@ kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
 # Should return: HTTP/2 200
 ```
 
-**Common fixes:**
-- Wrong service URL in tunnel config
-- Ingress NGINX not listening on 443
-- Application pods not running
-
-**Verify tunnel route:**
-- Cloudflare → Zero Trust → Tunnels → Your tunnel
-- Check URL is: `https://ingress-nginx-controller.ingress-nginx.svc.cluster.local:443`
-- Verify "No TLS Verify" is ON
+**Fix:** Verify tunnel route URL is exactly: `https://ingress-nginx-controller.ingress-nginx.svc.cluster.local:443`
 
 ---
 
-### Issue: Certificate not issuing
+### Issue: Certificate Not Ready
 
 ```bash
 kubectl describe certificate hello-world-tls -n default
@@ -511,9 +838,9 @@ kubectl logs -n cert-manager -l app=cert-manager --tail=50
 ```
 
 **Common causes:**
-- DNS not resolving yet
+- DNS not resolving yet (wait 2-3 minutes)
 - ClusterIssuer misconfigured
-- Rate limits from Let's Encrypt
+- Let's Encrypt rate limits
 
 **Fix:**
 ```bash
@@ -525,214 +852,149 @@ kubectl delete ingress hello-world -n default
 
 ---
 
-## Useful Commands
-
-### Tunnel Management
-```bash
-# Check tunnel status
-kubectl get pods -n cloudflare
-kubectl logs -n cloudflare -l app=cloudflared -f
-
-# Restart tunnel
-kubectl rollout restart deployment cloudflared -n cloudflare
-
-# Delete and redeploy tunnel
-kubectl delete deployment cloudflared -n cloudflare
-# Then redeploy with kubectl apply
-```
-
-### Application Management
-```bash
-# View all internet-facing services
-kubectl get ingress -A
-
-# Check SSL certificates
-kubectl get certificate -A
-
-# View specific certificate details
-kubectl describe certificate <name> -n <namespace>
-
-# Test internal connectivity
-kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
-  curl -Ik https://ingress-nginx-controller.ingress-nginx.svc.cluster.local:443
-
-# Check DNS from cluster
-kubectl run dns-test --image=busybox -i --rm --restart=Never -- \
-  nslookup hello.yourdomain.com
-```
-
-### Debugging
-```bash
-# View Ingress NGINX logs
-kubectl logs -n ingress-nginx -l app.kubernetes.io/component=controller --tail=100
-
-# Check cert-manager logs
-kubectl logs -n cert-manager -l app=cert-manager --tail=50
-
-# View all resources
-kubectl get all -n <namespace>
-
-# Describe pod for detailed info
-kubectl describe pod <pod-name> -n <namespace>
-
-# Get events
-kubectl get events -n <namespace> --sort-by='.lastTimestamp'
-```
-
----
-
-## Deploy Additional Services
-
-Once your first app works, adding more is trivial:
-
-```bash
-# Deploy second app
-kubectl create deployment nginx-app --image=nginx
-kubectl expose deployment nginx-app --port=80
-
-# Create ingress
-cat <<'EOF' | kubectl apply -f -
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: nginx-app
-  namespace: default
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-spec:
-  ingressClassName: nginx
-  tls:
-  - hosts:
-    - app.yourdomain.com
-    secretName: nginx-app-tls
-  rules:
-  - host: app.yourdomain.com
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: nginx-app
-            port:
-              number: 80
-EOF
-```
-
-**Result:** `https://app.yourdomain.com` works in 2-3 minutes! 🚀
-
----
-
-## Complete Troubleshooting Table
+### Complete Troubleshooting Table
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Tunnel shows "Down" | cloudflared not connecting | Check logs, restart deployment |
 | Error 522 | Tunnel can't reach Ingress | Verify tunnel URL and Ingress status |
-| Could not resolve host | Missing/wrong DNS record | Add A record with Proxy ON (orange) |
-| Certificate not ready | DNS not propagating | Wait 2-3 minutes, check cert-manager logs |
+| Could not resolve host | Missing/wrong DNS record | Add A record with Proxy ON |
+| Certificate not ready | DNS not propagating | Wait 2-3 min, check cert-manager logs |
 | ErrImagePull | Image not accessible | Use public image or check registry |
-| CrashLoopBackOff | App crashing | Check pod logs |
+| CrashLoopBackOff | App crashing | Check pod logs: `kubectl logs <pod>` |
 | Node NotReady | Flannel down | Restart Flannel pods |
 | No external IP on service | MetalLB issue | Check MetalLB configuration |
 
 ---
 
-## Best Practices
+## 11. Maintenance & Expansion
 
-1. **Always use HTTPS** - Never expose HTTP to internet
-2. **Monitor tunnel health** - Check cloudflared logs weekly
-3. **Keep certificates valid** - Cert-manager auto-renews, but verify monthly
-4. **Use namespaces** - Organize apps by environment (prod, staging, dev)
-5. **Test internally first** - Verify apps work locally before exposing
-6. **One ingress per service** - Easier to manage and debug
-7. **Backup regularly** - Use Proxmox snapshots or Velero
-8. **Update periodically** - Keep Kubernetes and components current
+### Backups
 
----
+**Proxmox snapshots:**
+```bash
+# On Proxmox host
+qm snapshot <VMID> backup-$(date +%Y%m%d)
+```
 
-## Cost Breakdown
+**Velero (cluster backup):**
+```bash
+# Install Velero for automated backups
+kubectl apply -f https://github.com/vmware-tanzu/velero/releases/download/v1.12.0/velero-v1.12.0-linux-amd64.tar.gz
+```
 
-| Item | Cost |
-|------|------|
-| Domain (Namecheap) | ~$12/year |
-| Cloudflare Free plan | $0 |
-| SSL Certificates | $0 |
-| Hardware | Already owned |
-| **Total monthly cost** | **~$1/month** |
+### Scaling
 
----
+**Add worker nodes:**
+1. Create new VM in Proxmox
+2. Install Kubernetes components (Section 3)
+3. Run the `kubeadm join` command
+4. Verify: `kubectl get nodes`
 
-## What You've Built
-
-✅ Production-grade Kubernetes cluster  
-✅ Internet-accessible services with HTTPS  
-✅ Hidden home IP, no port forwarding  
-✅ Free DDoS protection  
-✅ Automatic SSL certificates  
-✅ Deploy unlimited apps instantly  
-✅ Complete infrastructure control  
-
-**Deploy like Heroku. Run at home. Pay almost nothing.** 🚀
-
----
-
-## Summary
-
-This guide provided a complete setup for:
-
-1. **Local Kubernetes cluster** on Proxmox with 3 nodes
-2. **Network components:** Flannel, MetalLB, Ingress NGINX
-3. **Certificate management:** Cert-Manager with Let's Encrypt
-4. **Internet exposure:** Cloudflare Tunnel (no port forwarding)
-5. **Automatic SSL:** Every service gets HTTPS automatically
-6. **Troubleshooting:** Complete diagnostic procedures
-
-You can now deploy any application and have it accessible worldwide in minutes, with enterprise-grade security, at near-zero cost.
-
----
-
-**Author:** Kenechi Dukor  
-**© 2025** | Technical Architecture Guide  
-**License:** Free to use and share with attribution
-
----
-
-## Quick Reference Card
+### Updates
 
 ```bash
-# Deploy new app (replace APP_NAME and yourdomain.com)
-kubectl create deployment APP_NAME --image=YOUR_IMAGE
-kubectl expose deployment APP_NAME --port=80
+# Update packages
+sudo apt update && sudo apt upgrade -y
+
+# Check Kubernetes version
+kubectl version --short
+
+# Plan upgrade
+sudo kubeadm upgrade plan
+```
+
+### Deploy Additional Services
+
+Once hello-world works, add more apps easily:
+
+```bash
+kubectl create deployment myapp --image=nginx
+kubectl expose deployment myapp --port=80
 
 cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: APP_NAME
+  name: myapp
   annotations:
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
 spec:
   ingressClassName: nginx
   tls:
   - hosts:
-    - APP_NAME.yourdomain.com
-    secretName: APP_NAME-tls
+    - myapp.yourdomain.com
+    secretName: myapp-tls
   rules:
-  - host: APP_NAME.yourdomain.com
+  - host: myapp.yourdomain.com
     http:
       paths:
       - path: /
         pathType: Prefix
         backend:
           service:
-            name: APP_NAME
+            name: myapp
             port:
               number: 80
 EOF
-
-# Wait 2-3 minutes, then access:
-# https://APP_NAME.yourdomain.com
 ```
 
-**That's it!** 🎉
+Result: `https://myapp.yourdomain.com` works in 2-3 minutes! 🚀
+
+---
+
+## 12. Summary
+
+### What You've Built
+
+✅ **Local Kubernetes cluster** on Proxmox with 3 nodes  
+✅ **Network infrastructure:** Flannel, MetalLB, Ingress NGINX  
+✅ **Certificate automation:** Cert-Manager with Let's Encrypt  
+✅ **Internet exposure:** Cloudflare Tunnel (no port forwarding)  
+✅ **Automatic SSL:** Every service gets HTTPS automatically  
+✅ **Management GUI:** Portainer for visual administration  
+✅ **Persistent storage:** 160GB HDD for stateful apps  
+
+### Capabilities
+
+**Local:**
+- Multi-node orchestration with automatic failover
+- Real LAN IP load balancing via MetalLB
+- Persistent storage for stateful applications
+- GUI management via Portainer
+
+**Internet:**
+- Services accessible worldwide via Cloudflare Tunnel
+- Automatic SSL certificates from Let's Encrypt
+- Free DDoS protection and CDN from Cloudflare
+- Hidden home IP, no exposed ports
+- Professional-grade security
+
+### Cost
+
+| Item | Cost |
+|------|------|
+| Domain | ~$12/year |
+| Cloudflare | $0 |
+| SSL Certificates | $0 |
+| Hardware | Already owned |
+| **Total** | **~$1/month** |
+
+### Next Steps
+
+- Deploy your own applications
+- Add monitoring (Prometheus/Grafana)
+- Set up CI/CD pipelines
+- Experiment with different workloads
+- Share your setup with others!
+
+You now have enterprise-grade infrastructure that rivals cloud providers, running at home, under your complete control, for almost no cost.
+
+**Deploy like Heroku. Run at home. Pay almost nothing.** 🚀
+
+---
+
+**Author:** Kenechi Dukor  
+**© 2025** | Free to use and share with attribution  
+
+**End of Document**
