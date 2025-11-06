@@ -1,6 +1,7 @@
 # Home Kubernetes Lab Deployment on Proxmox (Supermicro X10SLL-S Platform)
 
 **Author:** Kenechi Dukor 
+
 **Platform:** Supermicro X10SLL-S (Intel Xeon E3-1225 v3, 16 GB RAM, 2 TB SSD, 160 GB HDD)  
 **Host OS:** Proxmox VE 9.0.3  
 **Network:** 192.168.0.0/24 LAN
