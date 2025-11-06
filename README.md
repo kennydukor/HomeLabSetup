@@ -1,4 +1,4 @@
-# 🧠 Complete Kubernetes Home Lab with Internet Exposure
+# Complete Kubernetes Home Lab with Internet Exposure
 
 **Author:** Kenechi Dukor  
 **Last Updated:** November 2025
@@ -10,7 +10,7 @@
 
 ---
 
-## 📚 Table of Contents
+## Table of Contents
 
 **Part I: Local Cluster Setup**
 1. [System Overview](#1-system-overview)
@@ -133,7 +133,7 @@ All nodes should appear, though they'll be "NotReady" until we install the netwo
 
 ## 4. Network & Load Balancing Components
 
-### 🕸️ Flannel (CNI - Container Network Interface)
+### Flannel (CNI - Container Network Interface)
 
 **Purpose:** Provides pod-to-pod networking overlay (10.244.0.0/16).
 
@@ -159,7 +159,7 @@ All nodes should now show `Ready`.
 
 ---
 
-### ⚖️ MetalLB (Bare-Metal LoadBalancer)
+### MetalLB (Bare-Metal LoadBalancer)
 
 **Purpose:** Enables LoadBalancer services on non-cloud clusters by assigning IPs from your LAN.
 
@@ -197,7 +197,7 @@ Now any service of type `LoadBalancer` automatically gets a LAN IP (e.g., 192.16
 
 ---
 
-### 🌍 Ingress NGINX
+### Ingress NGINX
 
 **Purpose:** Routes HTTP/HTTPS traffic to internal services using domain names.
 
@@ -218,7 +218,7 @@ Note the EXTERNAL-IP assigned to `ingress-nginx-controller` (e.g., 192.168.0.202
 
 ---
 
-### 🔒 Cert-Manager
+### Cert-Manager
 
 **Purpose:** Automates SSL/TLS certificate management from Let's Encrypt.
 
@@ -240,7 +240,7 @@ Wait for all cert-manager pods to show `Running`.
 
 ## 5. Management & Monitoring Tools
 
-### 🧭 Portainer (Kubernetes GUI)
+### Portainer (Kubernetes GUI)
 
 **Purpose:** Visual management of containers, pods, and volumes.
 
@@ -265,7 +265,7 @@ Create admin user on first login.
 
 ---
 
-### 💾 Persistent Storage (Optional)
+### Persistent Storage (Optional)
 
 Mount the 160 GB HDD and make it available for persistent volumes:
 
@@ -332,7 +332,7 @@ MetalLB will assign an IP like `192.168.0.201`. Access via browser: `http://192.
 
 Now let's make your Kubernetes services accessible from anywhere on the internet using **Cloudflare Tunnel** - no port forwarding needed!
 
-### 🏗️ Complete Architecture
+### Complete Architecture
 
 ```mermaid
 graph TB
@@ -372,7 +372,7 @@ graph TB
     style App2 fill:#26a69a
 ```
 
-### 📊 Traffic Flow
+### Traffic Flow
 
 ```
 Internet User
@@ -405,7 +405,7 @@ Application Pods (hello-world)
     └─ Returns: HTML response
 ```
 
-### 🔄 Request-Response Sequence
+### Request-Response Sequence
 
 ```mermaid
 sequenceDiagram
@@ -430,7 +430,7 @@ sequenceDiagram
     CF->>User: HTTPS with Let's Encrypt cert
 ```
 
-### 🧩 Component Roles
+### Component Roles
 
 **Cloudflare:** Manages DNS, provides DDoS protection, terminates SSL for public traffic, and routes requests through the tunnel.
 
@@ -444,7 +444,7 @@ sequenceDiagram
 
 **Flannel:** Provides pod-to-pod networking using VXLAN overlay network (10.244.0.0/16).
 
-### 🔐 Security Benefits
+### Security Benefits
 
 - **No exposed home IP:** Your public IP address never appears in DNS or traffic
 - **No open ports:** Router firewall remains completely closed
@@ -455,7 +455,7 @@ sequenceDiagram
 
 ---
 
-### 📋 Prerequisites for Internet Exposure
+### Prerequisites for Internet Exposure
 
 Before starting, you need:
 
@@ -465,7 +465,7 @@ Before starting, you need:
 
 ---
 
-### 🚀 Step-by-Step Setup
+### Step-by-Step Setup
 
 #### Step 1: Transfer Domain DNS to Cloudflare (10 minutes)
 
