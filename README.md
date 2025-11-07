@@ -22,10 +22,12 @@
 6. [Deploying Applications Locally](#6-deploying-applications-locally)
 
 **Part II: Internet Exposure**
+
 7. [Exposing Services to the Internet](#7-exposing-services-to-the-internet)
 8. [Deploy Your First Internet-Accessible App](#8-deploy-your-first-internet-accessible-app)
 
 **Part III: Operations**
+
 9. [Handy Operational Commands](#9-handy-operational-commands)
 10. [Troubleshooting Guide](#10-troubleshooting-guide)
 11. [Maintenance & Expansion](#11-maintenance--expansion)
@@ -43,7 +45,7 @@ This home-lab environment uses Proxmox VE as the base hypervisor to host a Kuber
 
 | Node | Role | IP Address | vCPU | Memory |
 |------|------|------------|------|--------|
-| k8s-master | Control Plane | 192.168.0.32 | 2 | 3 GB |
+| k8s-master | Control Plane | 192.168.0.32 | 1 | 3 GB |
 | k8s-node1 | Worker Node | 192.168.0.39 | 2 | 4 GB |
 | k8s-node2 | Worker Node | 192.168.0.45 | 2 | 4 GB |
 
@@ -444,39 +446,6 @@ graph TB
     style App2 fill:#26a69a
 ```
 
-### Traffic Flow
-
-```
-Internet User
-    ↓ Types: https://hello.yourdomain.com
-    ↓
-Cloudflare Network (104.21.x.x, 172.67.x.x)
-    ├─ Resolves DNS
-    ├─ Checks DDoS rules
-    └─ Terminates SSL (public certificate)
-    ↓
-Cloudflare Tunnel (encrypted WebSocket)
-    ↓ Established connection (outbound from home)
-    ↓
-Your Home Network (192.168.0.0/24)
-    ├─ NO ports opened
-    ├─ NO port forwarding
-    └─ Home IP hidden
-    ↓
-Proxmox VE → Kubernetes Cluster
-    ↓
-cloudflared Pods (2 replicas, 8 connections total)
-    ↓ Routes to: https://ingress-nginx:443
-    ↓
-Ingress NGINX (192.168.0.202:443)
-    ├─ Checks hostname: hello.yourdomain.com
-    ├─ TLS handshake (internal cert)
-    └─ Routes to: hello-world service
-    ↓
-Application Pods (hello-world)
-    └─ Returns: HTML response
-```
-
 ### Request-Response Sequence
 
 ```mermaid
@@ -539,7 +508,7 @@ Before starting, you need:
 
 ### Step-by-Step Setup
 
-#### Step 1: Transfer Domain DNS to Cloudflare (10 minutes)
+#### Step 1: Transfer Domain DNS to Cloudflare
 
 **At Cloudflare:**
 1. Log in to https://dash.cloudflare.com
@@ -564,7 +533,7 @@ nslookup -type=ns yourdomain.com
 
 ---
 
-#### Step 2: Create Cloudflare Tunnel (5 minutes)
+#### Step 2: Create Cloudflare Tunnel
 
 1. In Cloudflare Dashboard, click **Zero Trust** (or go to https://one.dash.cloudflare.com)
 2. Click **"Get started with a free plan"** if prompted
@@ -579,7 +548,7 @@ nslookup -type=ns yourdomain.com
 
 ---
 
-#### Step 3: Deploy Cloudflared in Kubernetes (2 minutes)
+#### Step 3: Deploy Cloudflared in Kubernetes
 
 ```bash
 # Create namespace
@@ -632,7 +601,7 @@ kubectl logs -n cloudflare -l app=cloudflared --tail=10
 
 ---
 
-#### Step 4: Configure Tunnel Ingress Rules (3 minutes)
+#### Step 4: Configure Tunnel Ingress Rules
 
 **In the Cloudflare browser tab:**
 
@@ -654,7 +623,7 @@ kubectl logs -n cloudflare -l app=cloudflared --tail=10
 
 ---
 
-#### Step 5: Create DNS Records (2 minutes)
+#### Step 5: Create DNS Records
 
 **In Cloudflare Dashboard:**
 
@@ -1124,43 +1093,6 @@ Result: `https://myapp.yourdomain.com` works automatically! 🚀
 
 ---
 
-## 12. Summary
-
-### What You've Built
-
-✅ **Local Kubernetes cluster** on Proxmox with 3 nodes  
-✅ **Network infrastructure:** Flannel, MetalLB, Ingress NGINX  
-✅ **Certificate automation:** Cert-Manager with Let's Encrypt  
-✅ **Internet exposure:** Cloudflare Tunnel (no port forwarding)  
-✅ **Automatic SSL:** Every service gets HTTPS automatically  
-✅ **Management GUI:** Portainer for visual administration  
-✅ **Persistent storage:** 160GB HDD for stateful apps  
-
-### Capabilities
-
-**Local:**
-- Multi-node orchestration with automatic failover
-- Real LAN IP load balancing via MetalLB
-- Persistent storage for stateful applications
-- GUI management via Portainer
-
-**Internet:**
-- Services accessible worldwide via Cloudflare Tunnel
-- Automatic SSL certificates from Let's Encrypt
-- Free DDoS protection and CDN from Cloudflare
-- Hidden home IP, no exposed ports
-- Professional-grade security
-
-### Cost
-
-| Item | Cost |
-|------|------|
-| Domain | ~$12/year |
-| Cloudflare | $0 |
-| SSL Certificates | $0 |
-| Hardware | Already owned |
-| **Total** | **~$1/month** |
-
 ### Critical Success Factors
 
 The following are **essential** for cluster stability:
@@ -1195,19 +1127,12 @@ During the development of this lab, several critical issues were discovered and 
 
 5. **Fresh VM solves persistent issues** - When a node experiences repeated failures despite fixes, recreating the VM from scratch (with proper configuration) is often faster than troubleshooting deep system issues.
 
----
-
-**You now have enterprise-grade infrastructure that rivals cloud providers, running at home, under your complete control, for almost no cost.**
-
-**Deploy like Heroku. Run at home. Pay almost nothing.** 🚀
-
----
 
 **Author:** Kenechi Dukor  
-**© 2025** | Free to use and share with attribution  
+**© 2025**   
 
 **Version History:**
-- v2.0 (Nov 6, 2025): Added critical swap warnings, IP forwarding requirements, manual DNS approach, enhanced troubleshooting
+- v2.0 (Nov 6, 2025):
 - v1.0 (Nov 2025): Initial release
 
 **End of Document**
