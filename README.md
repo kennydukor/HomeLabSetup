@@ -417,7 +417,7 @@ graph TB
     Prox[Proxmox Hypervisor]
     Master[k8s-master<br/>192.168.0.32]
     Node1[k8s-node1<br/>192.168.0.39]
-    Node2[k8s-node2<br/>192.168.0.43]
+    Node2[k8s-node2<br/>192.168.0.45]
     CF_Pods[cloudflared Pods<br/>2 replicas]
     Ingress[Ingress NGINX<br/>192.168.0.202]
     App1[hello-world<br/>Pod 1]
