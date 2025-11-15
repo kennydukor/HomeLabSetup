@@ -49,7 +49,7 @@ This home-lab environment uses Proxmox VE as the base hypervisor to host a Kuber
 | k8s-node1 | Worker Node | 192.168.0.39 | 2 | 4 GB |
 | k8s-node2 | Worker Node | 192.168.0.45 | 2 | 4 GB |
 
-Additional 160 GB HDD is mounted at `/mnt/pve/repo160` for repository and persistent storage.
+An additional 160 GB HDD is mounted at `/mnt/pve/repo160` for repository and persistent storage.
 
 ---
 
@@ -399,9 +399,8 @@ Proxmox VE → Kubernetes Cluster
 cloudflared Pods (2 replicas, 8 connections total)
     ↓ Routes to: ingress-nginx service
     ↓
-Ingress NGINX (192.168.0.202:443)
+Ingress NGINX (192.168.0.202:80)
     ├─ Checks hostname: hello.yourdomain.com
-    ├─ TLS handshake (internal cert)
     └─ Routes to: hello-world service
     ↓
 Application Pods (hello-world)
@@ -461,11 +460,11 @@ sequenceDiagram
     Note over CF: DNS Resolution<br/>DDoS Check<br/>SSL Termination
     CF->>Tunnel: Route via tunnel
     Tunnel-->>CFPod: Established connection
-    CFPod->>Ingress: HTTPS request to<br/>ingress-nginx:443
+    CFPod->>Ingress: HTTPS request to<br/>ingress-nginx:80
     Note over Ingress: Check hostname routing
     Ingress->>Pod: Forward to hello-world:80
     Pod->>Ingress: HTML response
-    Ingress->>CFPod: HTTPS response
+    Ingress->>CFPod: HTTP response
     CFPod-->>Tunnel: Encrypted response
     Tunnel->>CF: Response data
     CF->>User: HTTPS with Let's Encrypt cert
@@ -477,9 +476,9 @@ sequenceDiagram
 
 **cloudflared pods:** Maintain encrypted tunnel connection to Cloudflare (2 pods × 4 connections = 8 total). Automatically reconnect on failure.
 
-**Ingress NGINX:** Routes HTTP/HTTPS traffic by hostname to the correct Kubernetes service. Handles internal SSL/TLS.
+**Ingress NGINX:** Routes HTTP traffic by hostname to the correct Kubernetes service. No internal SSL/TLS needed when using HTTP tunnel mode.
 
-**Cert-Manager:** Automatically requests and renews SSL certificates from Let's Encrypt using HTTP-01 challenges.
+**Cert-Manager:** NOT REQUIRED for HTTP tunnel mode. Cloudflare handles all SSL at their edge. You can optionally use it for other purposes, but it's not part of the internet exposure workflow.
 
 **MetalLB:** Assigns real LAN IP addresses (from 192.168.0.200-250 pool) to LoadBalancer services.
 
@@ -492,7 +491,7 @@ sequenceDiagram
 - **Encrypted tunnel:** All traffic encrypted end-to-end via QUIC/WebSocket
 - **DDoS protection:** Cloudflare filters malicious traffic before it reaches you
 - **Automatic SSL:** Let's Encrypt certificates issued and renewed automatically
-- **Outbound only:** Cluster initiates connection; no inbound connections accepted
+- **Outbound only:** Cloudflare provides and manages SSL certificates automatically at their edge
 
 ---
 
@@ -502,7 +501,7 @@ Before starting, you need:
 
 1. ✅ A domain name (e.g., from Namecheap - costs ~$10-15/year)
 2. ✅ A free Cloudflare account (sign up at https://cloudflare.com)
-3. ✅ Your Kubernetes cluster with Ingress NGINX and Cert-Manager installed ✅
+3. ✅ Your Kubernetes cluster with Ingress NGINX installed ✅
 
 ---
 
@@ -603,6 +602,8 @@ kubectl logs -n cloudflare -l app=cloudflared --tail=10
 
 #### Step 4: Configure Tunnel Ingress Rules
 
+⚠️ **IMPORTANT:** This guide uses HTTP tunnel mode where Cloudflare handles SSL. When using HTTP mode, cert-manager and internal SSL certificates are NOT needed.
+
 **In the Cloudflare browser tab:**
 
 1. Go to **Networks** → **Tunnels** → **home-k8s-cluster**
@@ -612,14 +613,12 @@ kubectl logs -n cloudflare -l app=cloudflared --tail=10
    - **Subdomain:** `*` (asterisk for wildcard)
    - **Domain:** `yourdomain.com` (select from dropdown)
    - **Path:** (leave blank)
-   - **Service Type:** `HTTPS`
-   - **Service URL:** `ingress-nginx-controller.ingress-nginx.svc.cluster.local:443`
+   - **Service Type:** `HTTP`
+   - **Service URL:** `ingress-nginx-controller.ingress-nginx.svc.cluster.local:80`
+     
+5. Click **"Save"**
 
-5. Expand **"Additional application settings"**
-6. Under **TLS**, toggle **"No TLS Verify"** to **ON**
-7. Click **"Save"**
-
-**⚠️ Important:** If you get a DNS conflict error, delete the route and proceed to Step 5 to create the DNS record manually.
+⚠️ **IMPORTANT:** If you get a DNS conflict error, delete the route and proceed to Step 5 to create the DNS record manually.
 
 ---
 
@@ -649,7 +648,19 @@ nslookup hello.yourdomain.com
 
 ---
 
-#### Step 6: Create SSL Certificate Issuer (2 minutes)
+#### Step 6: (OPTIONAL) Create SSL Certificate Issuer
+
+⚠️ **SKIP THIS STEP if using HTTP tunnel mode** (recommended approach)
+
+This step is ONLY needed if you want to use HTTPS tunnel mode, which requires:
+- Changing tunnel configuration to HTTPS in Step 4
+- Managing your own SSL certificates
+- More complex setup
+
+For most users, HTTP tunnel mode (where Cloudflare handles SSL) is simpler and recommended.
+
+<details>
+<summary>Click here only if you want HTTPS tunnel mode</summary>
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -677,6 +688,8 @@ EOF
 kubectl get clusterissuer
 # Should show: letsencrypt-prod   True
 ```
+
+</details>
 
 ---
 
@@ -722,14 +735,8 @@ kind: Ingress
 metadata:
   name: hello-world
   namespace: default
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
 spec:
   ingressClassName: nginx
-  tls:
-  - hosts:
-    - hello.yourdomain.com
-    secretName: hello-world-tls
   rules:
   - host: hello.yourdomain.com
     http:
@@ -756,9 +763,10 @@ kubectl get pods -w
 # Check certificate (takes 2-3 minutes)
 kubectl get certificate
 
-# Test from your cluster
+# Test from your cluster (tests HTTP connectivity to ingress)
 kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
-  curl -I https://hello.yourdomain.com
+  curl -I http://ingress-nginx-controller.ingress-nginx.svc.cluster.local:80 \
+  -H "Host: hello.yourdomain.com"
 ```
 
 ### Test from Internet
@@ -822,9 +830,9 @@ kubectl get ingress -A
 # Check Ingress NGINX logs
 kubectl logs -n ingress-nginx -l app.kubernetes.io/component=controller --tail=100
 
-# Test internal connectivity
+# Test internal connectivity (HTTP mode)
 kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
-  curl -Ik https://ingress-nginx-controller.ingress-nginx.svc.cluster.local:443
+  curl -I http://ingress-nginx-controller.ingress-nginx.svc.cluster.local:80
 ```
 
 ---
@@ -919,9 +927,9 @@ kubectl logs -n cloudflare -l app=cloudflared --tail=50
 kubectl get pods -n ingress-nginx
 kubectl get svc -n ingress-nginx
 
-# Test if pods can reach the service
+# Test if pods can reach the service (HTTP mode)
 kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
-  curl -Ik https://ingress-nginx-controller.ingress-nginx.svc.cluster.local:443
+  curl -I http://ingress-nginx-controller.ingress-nginx.svc.cluster.local:80
 # Should return: HTTP/2 (any status code means connectivity works)
 ```
 
@@ -931,7 +939,7 @@ kubectl run test --image=curlimages/curl -i --rm --restart=Never -- \
 - "No TLS Verify" not enabled in tunnel config
 
 **Fix:**
-1. Verify tunnel configuration shows: `ingress-nginx-controller.ingress-nginx.svc.cluster.local:443`
+1. Verify tunnel configuration shows: `ingress-nginx-controller.ingress-nginx.svc.cluster.local:80`
 2. Verify DNS CNAME points to: `<tunnel-id>.cfargotunnel.com`
 3. Verify Proxy status is ON (orange cloud)
 4. Check tunnel logs for connection errors
@@ -983,6 +991,54 @@ kubectl delete ingress hello-world -n default
 # Watch certificate creation
 kubectl get certificate -w
 ```
+
+### Issue: ERR_TOO_MANY_REDIRECTS
+
+**Cause:** TLS configuration in Ingress when using HTTP tunnel mode
+
+**Symptoms:**
+- Browser shows "ERR_TOO_MANY_REDIRECTS"
+- Site was working before, stops after configuration changes
+- Infinite redirect loop
+
+**Fix:**
+```bash
+# Edit the ingress
+kubectl edit ingress <ingress-name> -n <namespace>
+
+# Remove these sections:
+# 1. Delete any SSL redirect annotations:
+#    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+#    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+#
+# 2. Delete the entire tls: section
+
+# Save and exit
+```
+
+**Explanation:** When Cloudflare Tunnel uses HTTP mode, SSL is handled 
+at Cloudflare's edge. Having TLS configured in your Ingress creates a 
+redirect loop because the Ingress tries to redirect HTTP to HTTPS, but 
+the tunnel always sends HTTP.
+```
+
+---
+
+### 6. **Update Architecture Diagram Description**
+
+**Change this line:**
+```
+Ingress NGINX (192.168.0.202:80)
+    ├─ Checks hostname: hello.yourdomain.com
+    ├─ TLS handshake (internal cert) 
+    └─ Routes to: hello-world service
+```
+
+**To:**
+```
+Ingress NGINX (192.168.0.202:80)
+    ├─ Checks hostname: hello.yourdomain.com
+    └─ Routes to: hello-world service
 
 ---
 
@@ -1067,14 +1123,8 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: myapp
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
 spec:
   ingressClassName: nginx
-  tls:
-  - hosts:
-    - myapp.yourdomain.com
-    secretName: myapp-tls
   rules:
   - host: myapp.yourdomain.com
     http:
@@ -1089,7 +1139,7 @@ spec:
 EOF
 ```
 
-Result: `https://myapp.yourdomain.com` works automatically! 🚀
+Result: `https://myapp.yourdomain.com` works automatically!
 
 ---
 
@@ -1101,6 +1151,7 @@ The following are **essential** for cluster stability:
 2. ⚠️ **IP forwarding must be enabled** on all nodes
 3. ⚠️ **Cloudflare tunnel DNS must use manual CNAME** (more reliable than auto-creation)
 4. ⚠️ **"No TLS Verify" must be enabled** in Cloudflare tunnel configuration
+5. ⚠️ **Do NOT use TLS in Ingress when using HTTP tunnel mode** - causes redirect loops
 
 ### Next Steps
 
@@ -1126,6 +1177,8 @@ During the development of this lab, several critical issues were discovered and 
 4. **ClusterIP routing requires working kube-proxy** - If pods can reach services via pod IP but not via ClusterIP, check that kube-proxy is running on all nodes.
 
 5. **Fresh VM solves persistent issues** - When a node experiences repeated failures despite fixes, recreating the VM from scratch (with proper configuration) is often faster than troubleshooting deep system issues.
+
+6. **Cloudflare Tunnel + HTTP mode = No Ingress TLS needed** - When using Cloudflare Tunnel with HTTP mode, do NOT configure TLS in your Kubernetes Ingress. Cloudflare handles all SSL at their edge. Including a `tls:` section in the Ingress causes redirect loops (ERR_TOO_MANY_REDIRECTS) because the Ingress tries to force HTTPS while the tunnel sends HTTP.
 
 
 **Author:** Kenechi Dukor  
